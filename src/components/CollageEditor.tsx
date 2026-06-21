@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import type { AnalysisResult, Category } from "@/utils/outfit.functions";
 
 // Canvas dimensions (2:3 Pinterest ratio)
@@ -163,21 +164,79 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
     fabricRef.current?.requestRenderAll();
   };
 
-  // Export as PNG
-  const handleExport = () => {
-    if (!fabricRef.current) return;
-    const dataUrl = fabricRef.current.toDataURL({
+  // Build a data URL of the current canvas without triggering a download
+  const exportDataUrl = (): string | null => {
+    if (!fabricRef.current) return null;
+    return fabricRef.current.toDataURL({
       format: "png",
       quality: 1,
       multiplier: 2, // 2x resolution = 1200x1800px
     });
+  };
+
+  // Export as PNG (existing download button)
+  const handleExport = () => {
+    const dataUrl = exportDataUrl();
+    if (!dataUrl) return;
     onExport?.(dataUrl);
 
-    // Also trigger download
     const a = document.createElement("a");
     a.href = dataUrl;
     a.download = `ootd-pin-${Date.now()}.png`;
     a.click();
+  };
+
+  // Send everything to the Pinterest browser extension, then open
+  // Pinterest's pin creation tool in a new tab. The extension's content
+  // script listens for this postMessage on this page and stores the
+  // payload (e.g. in chrome.storage), then fills the Pinterest form
+  // automatically once the new tab loads.
+  const handleSendToPinterest = () => {
+    const dataUrl = exportDataUrl();
+    if (!dataUrl) {
+      toast.error("Generate the collage first");
+      return;
+    }
+
+    const hashtags = (result.seo.hashtags || []).map((h) =>
+      h.startsWith("#") ? h : `#${h}`
+    );
+
+    const products = [
+      result.dress?.url
+        ? {
+            name: result.dress.title,
+            url: result.dress.url,
+            category: result.dress.category || "dress",
+          }
+        : null,
+      ...result.accessories
+        .filter((a) => a.amazon_url && a.amazon_url.includes("/dp/"))
+        .map((a) => ({
+          name: a.product_title || a.name,
+          url: a.amazon_url,
+          category: a.category,
+        })),
+    ].filter(Boolean);
+
+    const payload = {
+      image: dataUrl,
+      title: result.seo.title,
+      description: `${result.seo.description}\n\n${hashtags.join(" ")}`,
+      products,
+      timestamp: Date.now(),
+    };
+
+    window.postMessage(
+      { type: "OOTD_SEND_TO_PINTEREST", payload },
+      window.location.origin
+    );
+
+    toast.success("Sending to Pinterest… make sure the extension is installed");
+
+    setTimeout(() => {
+      window.open("https://www.pinterest.com/pin-creation-tool/", "_blank");
+    }, 300);
   };
 
   // Bring selected to front
@@ -265,6 +324,16 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
                    transition-colors"
       >
         ↓ Download Pinterest pin
+      </button>
+
+      {/* Send to Pinterest extension button */}
+      <button
+        onClick={handleSendToPinterest}
+        className="w-full border border-red-700 text-red-700 hover:bg-red-50
+                   font-medium py-2.5 px-4 rounded-lg flex items-center
+                   justify-center gap-2 transition-colors"
+      >
+        Send to Pinterest
       </button>
 
       {/* Hint */}
