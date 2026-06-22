@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import type { AnalysisResult, Category } from "@/utils/outfit.functions";
 
-// Canvas dimensions (2:3 Pinterest ratio)
 const W = 600;
 const H = 900;
 
@@ -12,7 +12,6 @@ const PASTEL_BACKGROUNDS = [
   "#FDF8F3", "#F3F8FD",
 ];
 
-// Initial placement for each category
 const INITIAL_PLACEMENT: Record<Category, {
   left: number; top: number; scaleX: number; scaleY: number; angle: number
 }> = {
@@ -23,6 +22,15 @@ const INITIAL_PLACEMENT: Record<Category, {
   bracelet:   { left: W * 0.82, top: H * 0.55, scaleX: 0.18, scaleY: 0.18, angle: 5 },
   sandals:    { left: W * 0.50, top: H * 0.85, scaleX: 0.30, scaleY: 0.30, angle: 0 },
 };
+
+// Route all Amazon CDN images through our Vercel proxy to fix CORS
+function proxyImageUrl(url: string): string {
+  if (!url) return url;
+  if (url.startsWith("data:")) return url;
+  if (url.startsWith("blob:")) return url;
+  if (url.startsWith("/")) return url;
+  return `/api/proxy-image?url=${encodeURIComponent(url)}`;
+}
 
 interface CollageEditorProps {
   result: AnalysisResult;
@@ -42,7 +50,6 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
 
   useEffect(() => {
     if (!canvasRef.current) return;
-
     let canvas: any;
 
     (async () => {
@@ -57,21 +64,15 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
       });
       fabricRef.current = canvas;
 
-      // Prepare delete icon image once
       const deleteIcon = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='12' fill='%23ff4444'/%3E%3Cpath d='M8 8l8 8M16 8l-8 8' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E";
       const deleteImg = document.createElement("img");
       deleteImg.src = deleteIcon;
       deleteImgRef.current = deleteImg;
 
-      // Helper: add delete control to a FabricImage instance
-      // In Fabric.js v7, controls are per-instance (via createControls()), not on the prototype
       const addDeleteControl = (img: any) => {
         if (!img.controls) return;
         img.controls.deleteControl = new fabric.Control({
-          x: 0.5,
-          y: -0.5,
-          offsetY: -16,
-          offsetX: 16,
+          x: 0.5, y: -0.5, offsetY: -16, offsetX: 16,
           cursorStyle: "pointer",
           mouseUpHandler: (_e: any, transform: any) => {
             canvas.remove(transform.target);
@@ -88,7 +89,6 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
         });
       };
 
-      // Build items list: anchor + accessories
       const items: Array<{
         category: Category;
         image_url: string | null | undefined;
@@ -115,9 +115,10 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
       itemsWithImages.forEach((item) => {
         const placement = INITIAL_PLACEMENT[item.category] || INITIAL_PLACEMENT.dress;
 
+        // Use proxy to bypass CORS on Amazon CDN images
         fabric.FabricImage.fromURL(
-          item.image_url!,
-          { crossOrigin: "anonymous" }
+          proxyImageUrl(item.image_url!),
+          {}
         ).then((img: any) => {
           img.set({
             ...placement,
@@ -126,73 +127,103 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
             hasControls: true,
             hasBorders: true,
             lockUniScaling: false,
+            globalCompositeOperation: "multiply",
           });
-
-          // Multiply blend mode removes white backgrounds visually
-          img.set({ globalCompositeOperation: "multiply" });
-
           addDeleteControl(img);
-
           canvas.add(img);
           canvas.requestRenderAll();
-
           loaded++;
           setLoadedCount(loaded);
-          if (loaded === itemsWithImages.length) {
-            setLoading(false);
-          }
+          if (loaded === itemsWithImages.length) setLoading(false);
         }).catch(() => {
           loaded++;
           setLoadedCount(loaded);
-          if (loaded === itemsWithImages.length) {
-            setLoading(false);
-          }
+          if (loaded === itemsWithImages.length) setLoading(false);
         });
       });
     })();
 
-    return () => {
-      canvas?.dispose();
-    };
+    return () => { canvas?.dispose(); };
   }, [result]);
 
-  // Update background color
   const changeBg = (color: string) => {
     setBgColor(color);
     fabricRef.current?.set("backgroundColor", color);
     fabricRef.current?.requestRenderAll();
   };
 
-  // Export as PNG
-  const handleExport = () => {
-    if (!fabricRef.current) return;
-    const dataUrl = fabricRef.current.toDataURL({
+  const exportDataUrl = (): string | null => {
+    if (!fabricRef.current) return null;
+    return fabricRef.current.toDataURL({
       format: "png",
       quality: 1,
-      multiplier: 2, // 2x resolution = 1200x1800px
+      multiplier: 2,
     });
-    onExport?.(dataUrl);
+  };
 
-    // Also trigger download
+  const handleExport = () => {
+    const dataUrl = exportDataUrl();
+    if (!dataUrl) return;
+    onExport?.(dataUrl);
     const a = document.createElement("a");
     a.href = dataUrl;
     a.download = `ootd-pin-${Date.now()}.png`;
     a.click();
   };
 
-  // Bring selected to front
+  const handleSendToPinterest = () => {
+    const dataUrl = exportDataUrl();
+    if (!dataUrl) {
+      toast.error("Generate the collage first");
+      return;
+    }
+
+    const hashtags = (result.seo.hashtags || []).map((h) =>
+      h.startsWith("#") ? h : `#${h}`
+    );
+
+    const products = [
+      result.dress?.url
+        ? { name: result.dress.title, url: result.dress.url, category: result.dress.category || "dress" }
+        : null,
+      ...result.accessories
+        .filter((a) => a.amazon_url && a.amazon_url.includes("/dp/"))
+        .map((a) => ({
+          name: a.product_title || a.name,
+          url: a.amazon_url,
+          category: a.category,
+        })),
+    ].filter(Boolean);
+
+    const payload = {
+      image: dataUrl,
+      title: result.seo.title,
+      description: `${result.seo.description}\n\n${hashtags.join(" ")}`,
+      products,
+      timestamp: Date.now(),
+    };
+
+    window.postMessage(
+      { type: "OOTD_SEND_TO_PINTEREST", payload },
+      window.location.origin
+    );
+
+    toast.success("Sending to Pinterest… make sure the extension is installed");
+    setTimeout(() => {
+      window.open("https://www.pinterest.com/pin-creation-tool/", "_blank");
+    }, 300);
+  };
+
   const bringToFront = () => {
     const obj = fabricRef.current?.getActiveObject();
     if (obj) fabricRef.current?.bringToFront(obj);
   };
 
-  // Send selected to back
   const sendToBack = () => {
     const obj = fabricRef.current?.getActiveObject();
     if (obj) fabricRef.current?.sendToBack(obj);
   };
 
-  // Delete selected
   const deleteSelected = () => {
     const obj = fabricRef.current?.getActiveObject();
     if (obj) {
@@ -203,16 +234,13 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Loading indicator */}
       {loading && (
         <div className="text-sm text-muted-foreground text-center py-2">
           Loading images... {loadedCount}/{totalCount}
         </div>
       )}
 
-      {/* Toolbar */}
       <div className="flex flex-wrap gap-2 items-center justify-between">
-        {/* Background colors */}
         <div className="flex gap-1 items-center">
           <span className="text-xs text-muted-foreground mr-1">BG:</span>
           {PASTEL_BACKGROUNDS.map((color) => (
@@ -226,48 +254,40 @@ export default function CollageEditor({ result, onExport }: CollageEditorProps) 
           ))}
         </div>
 
-        {/* Actions */}
         <div className="flex gap-2">
-          <button
-            onClick={bringToFront}
-            className="text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50"
-            title="Bring to front"
-          >
+          <button onClick={bringToFront}
+            className="text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50">
             ↑ Front
           </button>
-          <button
-            onClick={sendToBack}
-            className="text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50"
-            title="Send to back"
-          >
+          <button onClick={sendToBack}
+            className="text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50">
             ↓ Back
           </button>
-          <button
-            onClick={deleteSelected}
-            className="text-xs px-2 py-1 rounded border border-red-200 text-red-500 hover:bg-red-50"
-            title="Delete selected"
-          >
+          <button onClick={deleteSelected}
+            className="text-xs px-2 py-1 rounded border border-red-200 text-red-500 hover:bg-red-50">
             ✕ Delete
           </button>
         </div>
       </div>
 
-      {/* Canvas */}
       <div className="border rounded-lg overflow-hidden shadow-sm">
         <canvas ref={canvasRef} />
       </div>
 
-      {/* Export button */}
-      <button
-        onClick={handleExport}
+      <button onClick={handleExport}
         className="w-full bg-red-700 hover:bg-red-800 text-white font-medium
                    py-2.5 px-4 rounded-lg flex items-center justify-center gap-2
-                   transition-colors"
-      >
+                   transition-colors">
         ↓ Download Pinterest pin
       </button>
 
-      {/* Hint */}
+      <button onClick={handleSendToPinterest}
+        className="w-full border border-red-700 text-red-700 hover:bg-red-50
+                   font-medium py-2.5 px-4 rounded-lg flex items-center
+                   justify-center gap-2 transition-colors">
+        Send to Pinterest
+      </button>
+
       <p className="text-xs text-center text-muted-foreground">
         Drag to move · Pinch/drag corners to resize ·
         Use rotation handle · Click × to remove
