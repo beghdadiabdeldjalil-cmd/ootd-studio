@@ -343,7 +343,13 @@ Identify the anchor's category, then style 5 matching items from the OTHER 5 cat
         image_url: productImageUrl || null,
       },
       accessories: accessoriesWithLinks,
-      seo: parsed.seo,
+      seo: {
+  ...parsed.seo,
+  hashtags: (parsed.seo.hashtags || [])
+    .map((h: string) => h.replace(/^#/, "").trim())
+    .filter((h: string) => /^[a-zA-Z0-9_]+$/.test(h) && h.length > 1 && h.length < 50)
+    .slice(0, 12),
+},
     };
 
     return NextResponse.json(analysisResult);
